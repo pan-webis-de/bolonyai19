@@ -1,0 +1,754 @@
+import codecs
+import collections
+import en_core_web_sm
+import emoji
+import os
+import re
+import itertools
+import xml.etree.ElementTree as ET
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from lexical_diversity import lex_div as ld
+from textblob import TextBlob
+from nltk.corpus import stopwords
+from nltk.corpus import brown
+
+
+# lists: dev
+r = open("en/truth-dev.txt", "r")
+dev = r.read().split("\n")
+dev_l = []  # id
+dev_b = []  # bot/human
+dev_n = []  # male/female
+for line in dev:
+    l = line.split(":::")
+    if len(l) > 1:
+        dev_l.append(l[0])
+        dev_b.append(l[1])
+        dev_n.append(l[2])
+
+# lists: train
+r = open("en/truth-train.txt", "r")
+train = r.read().split("\n")
+train_l = []  # id
+train_b = []  # bot
+train_n = []  # gender
+for line in train:
+    l = line.split(":::")
+    if len(l) > 1:
+        train_l.append(l[0])
+        train_b.append(l[1])
+        train_n.append(l[2])
+
+
+# dict
+set_d = {'train': 0, 'dev': 1}
+nem_d = {'bot': 0, 'male': 1, 'female': 2, }
+bot_d = {'bot': 0, 'human': 1}
+
+# train & dev set raw text, indep var lists of lists
+pathlist = Path("en/").glob('**/*.xml')
+# s=0
+
+train_x_raw = []  # train szovegek
+dev_x_raw = []  # dev szovegek
+
+train_id = []  # id list train
+dev_id = []  # id list dev
+
+train_g = []  # gender list train
+dev_g = []  # gender list dev
+
+train_bt = []  # bot list train
+dev_bt = []  # bot list dev
+
+for path in pathlist:  # iter file-okon
+    #    s +=1
+    #    if s==5:     #ne fusson vegig
+    #        break
+    head, tail = os.path.split(path)
+    t = tail.split(".")
+    author = t[0]
+    path_in_str = str(path)
+    tree = ET.parse(path_in_str)
+    root = tree.getroot()
+    for child in root:
+        xi = []
+        for ch in child:
+            xi.append(ch.text)
+    if author in train_l:
+        train_x_raw.append(xi)
+        halm = 0
+        bot = bot_d[train_b[train_l.index(author)]]
+        gend = nem_d[train_n[train_l.index(author)]]
+        train_id.append(list(itertools.repeat(author, 100)))
+        train_g.append(list(itertools.repeat(gend, 100)))
+        train_bt.append(list(itertools.repeat(bot, 100)))
+
+    elif author in dev_l:
+        dev_x_raw.append(xi)
+        halm = 1
+        bot = bot_d[dev_b[dev_l.index(author)]]
+        gend = nem_d[dev_n[dev_l.index(author)]]
+        dev_id.append(list(itertools.repeat(author, 100)))
+        dev_g.append(list(itertools.repeat(gend, 100)))
+        dev_bt.append(list(itertools.repeat(bot, 100)))
+
+    else:
+        print("!! NOT FOUND IN ANY LIST")
+
+botorhuman = np.array(train_bt).flatten()
+botorhuman_dev = np.array(dev_bt).flatten()
+
+gender = np.array(train_g).flatten()
+gender_dev = np.array(dev_g).flatten()
+
+## Helper functions
+
+nlp = en_core_web_sm.load()
+stop = stopwords.words('english')
+word_list = brown.words()
+word_set = set(word_list)
+
+
+def PosTagger(text):
+    doc = nlp(text)
+    pos = []
+    for token in doc:
+        pos.append(token.pos_)
+    counter = collections.Counter(pos)
+    try:
+        noun = counter.get('NOUN') / len(doc)
+    except:
+        noun = 0
+    try:
+        verb = counter.get('VERB') / len(doc)
+    except:
+        verb = 0
+    try:
+        adj = counter.get('ADJ') / len(doc)
+    except:
+        adj = 0
+    return noun, verb, adj
+
+
+def LexicalDiversity(text):
+    tok = ld.tokenize(text)
+    basic = len(tok) / len(set(tok))
+    SimpleTTR = ld.ttr(tok)
+    RootTTR = ld.root_ttr(
+        tok)  # lexical_diversity(text)[2] # sztem ez a legjobb lexdiv mutató
+    LogTTR = ld.log_ttr(tok)
+    return basic, SimpleTTR, RootTTR, LogTTR
+
+
+def StopCounter(text):
+    lt = len(text.split())
+    stopnum = len([i for i in text.split() if i in stop])
+    try:
+        stoparany = stopnum / lt
+    except:
+        stoparany = 0
+    return stopnum, stoparany
+
+
+def SentiScore(text):
+    sentiscore = TextBlob(text).sentiment[0]
+    return sentiscore
+
+
+def ExtractEmojis(text):
+    all_emojis = ''.join(c for c in text if c in emoji.UNICODE_EMOJI)
+    count_emojis = len(all_emojis)
+    counter = collections.Counter(all_emojis)
+    hanyfele = len(counter.values())
+    try:
+        arany = hanyfele / count_emojis
+    except:
+        arany = 0
+    return all_emojis, count_emojis, hanyfele, arany
+
+
+def SpellChecker(text):
+    misspelled = len([i for i in text.split() if i not in word_set])
+    return misspelled
+
+
+def kukacokfv(text):  # hány @ van a tweetekben (db!)
+    splitted = text.split()
+    kukac = 0
+    if text.startswith("RT") == False:
+        for i in splitted:
+            if i.startswith('@') == True:
+                kukac = kukac + 1
+    return kukac
+
+
+def RTfv(text):
+    RT = 0
+    if text.startswith("RT") == True:
+        RT = 1
+    return RT
+
+
+def linkekfv(text):
+    splitted = text.split()
+    link = 0
+    if text.startswith("RT") == False:
+        for i in splitted:
+            if i.startswith('https://t.co/') == True:
+                link = link + 1
+    return link
+
+
+def kukactot(lista):
+    kukac_ossz = []
+    for j in range(0, 99):
+        kukac_ossz.append(sum(lista[j * 100:(
+                                                        j + 1) * 100]))  # lista: amiben eredetileg megnéztük, hogy mennyi kukac van
+    return kukac_ossz
+
+
+def calls(
+        text):  # ki jön a @ után, ezt végig kell futtatni tweetenként a többivel együtt,
+    # és a "friends listába kell menteni az eredményeket
+    splitted = text.split()
+    hivott = []
+    if text.startswith("RT") == False:
+        for i in splitted:
+            if i.startswith('@') == True:
+                if i not in hivott:
+                    hivott.append(i)
+    return hivott
+
+
+def friends_ratio(nom, denom):
+    ratio = []
+    for j in range(0, 99):
+        if denom[j] != 0:
+            ratio.append(len(nom[j]) / denom[
+                j])  # nom: amibe elmentjük a calls eredményét
+            # denom: amibe kimentjük a kukactot eredményét
+        else:
+            ratio.append(0)
+    return ratio
+
+
+def RTtot(lista):
+    RT_ossz = []
+    for j in range(0, 99):
+        RT_ossz.append(sum(lista[j * 100:(j + 1) * 100]))  # lista: amiben az eredetileg összeszámoltuk, hogy RT-e
+    return RT_ossz
+
+
+def RT_author(
+        text):  # ki volt az eredeti tweet szerzője, ezt végig kell futtatni tweetenként a többivel együtt,
+    # és a RT_authors listába kell menteni az eredményeket
+    splitted = text.split()
+    original = []
+    if text.startswith("RT") == True:
+        if text.split()[1] not in original:
+            original.append(text.split()[1])
+    return original
+
+
+def RT_ratio(nom, denom):
+    ratio = []
+    for j in range(0, 99):
+        if denom[j] != 0:
+            ratio.append(len(nom[j]) / denom[
+                j])  # nom: amibe kimentjük az RT_author eredményét,
+            # denom: amiben az RTot eredménye van
+        else:
+            ratio.append(0)
+    return ratio
+
+
+def friends_list_fun(lista):
+    friends_perfo =[]
+    for j in range(0,int((len(lista)/100))):
+        friends_perfo.append(lista[j*100:(j+1)*100])
+    friends_list = []
+    for k in friends_perfo:
+        people_list = []
+        for item in k:
+            for person in item:
+                people = person.split("'")
+                for i in people:
+                    if "@" in i:
+                        if i.strip('[,:.!;') not in people_list:
+                            people_list.append(i.strip('[,:.!;'))
+        friends_list.append(people_list)
+    return friends_list
+
+def RT_list_fun(lista):
+    RT_perfo =[]
+    for j in range(0,int((len(lista)/100))):
+        RT_perfo.append(lista[j*100:(j+1)*100])
+    RT_list = []
+    for k in RT_perfo:
+        people_list = []
+        for item in k:
+            for person in item:
+                people = person.split("'")
+                for i in people:
+                    if "@" in i:
+                        if i not in people_list:
+                            people_list.append(i)
+        RT_list.append(people_list)
+    return RT_list
+
+def gyakorisagok(text):
+    twe = text
+
+    # aposztrofok szama
+    pat = re.compile("\'")
+    ap = len(re.findall(pat, twe))
+
+    # nagybetuk szama
+    nagyb = len(re.findall('[A-Z]', twe))
+
+    # szamok szama
+    szam = len(re.findall('[0-9]', twe))
+
+    # pontok szama
+    pont = len(re.findall('\.', twe))
+
+    # vesszok szama
+    vesz = len(re.findall(',', twe))
+
+    # irasjelek szama (nem . ' ,)
+    irj = len(re.findall('[^.\'\w,]', re.sub(' ', '', twe)))
+
+    # aposztrofok kivetelevel irasjelek kivetele
+    ekezetn = re.sub('[^\'\w]', " ", twe)
+
+    # szavak szama
+    szo = len(ekezetn.split())
+
+    # betuk szama (szokozok nelkul)
+    bet = len(re.sub(" ", "", ekezetn))
+
+    # character flooding db
+    flood = len(re.findall(r'(.)\1\1+', ekezetn))
+
+    # aposztrof/kar
+    try:
+        apar = ap / bet
+    except:
+        apar = 0
+    # nagyb/kar
+    try:
+        nagybar = nagyb / bet
+    except:
+        nagybar = 0
+    # szam/kar
+    try:
+        szamar = szam / bet
+    except:
+        szamar = 0
+    # szo/pont
+    try:
+        modath = szo / (pont + 1)
+    except:
+        modath = 0
+    # vesz/kar
+    try:
+        veszar = vesz / bet
+    except:
+        veszar = 0
+    # irj/kar
+    try:
+        irjar = irj / bet
+    except:
+        irjar = 0
+    # bet/szo
+    try:
+        szohossz = bet / szo
+    except:
+        szohossz = 0
+    # flood/szo
+    try:
+        floodar = flood / szo
+    except:
+        floodar = 0
+    return ap, nagyb, szam, pont, vesz, irj, szo, bet, flood, apar, nagybar, szamar, modath, veszar, irjar, szohossz, floodar
+
+
+# create lists of features on tweets
+### TRAIN ###
+
+lexdiv = []  # lexikai diverzitás (RootTTR)
+noun = []  # főnevek aránya a tweetben
+verb = []  # igék aránya a tweetben
+adj = []  # melléknevek aránya a tweetben
+stoparany = []  # stopszavak aránya a tweetben
+sentiscore = []  # szentiment szkór a tweetre
+count_emojis = []  # hány emoji van a tweetben
+emoji_hanyfele = []  # hányféle emoji van a tweetben
+emoji_arany = []  # emojik aránya a tweetben
+misspelled = []  # hány szó van rosszul írva a tweetben
+kukacok = []
+friends = []
+RT = []
+RT_authors = []
+linkek = []
+ap_l = []
+nagyb_l = []
+szam_l = []
+pont_l = []
+vesz_l = []
+irj_l = []
+szo_l = []
+bet_l = []
+flood_l = []
+apar_l = []
+nagybar_l = []
+szamar_l = []
+modath_l = []
+veszar_l = []
+irjar_l = []
+szohossz_l = []
+floodar_l = []
+
+error = 0
+szamlalo = 0
+for l in train_x_raw:
+    szamlalo += 1
+    if szamlalo % 200 == 0:
+        print('train:', szamlalo)
+    for tweet in l:
+        try:
+            lexdiv.append(LexicalDiversity(tweet)[2])
+            noun.append(PosTagger(tweet)[0])
+            verb.append(PosTagger(tweet)[1])
+            adj.append(PosTagger(tweet)[2])
+            stoparany.append(StopCounter(tweet)[1])
+            sentiscore.append(SentiScore(tweet))
+            count_emojis.append(ExtractEmojis(tweet)[1])
+            emoji_hanyfele.append(ExtractEmojis(tweet)[2])
+            emoji_arany.append(ExtractEmojis(tweet)[3])
+            misspelled.append(SpellChecker(tweet))
+            kukacok.append(kukacokfv(tweet))
+            friends.append(calls(tweet))
+            RT.append(RTfv(tweet))
+            RT_authors.append(RT_author(tweet))
+            linkek.append(linkekfv(tweet))
+            ap_l.append(gyakorisagok(tweet)[0])
+            nagyb_l.append(gyakorisagok(tweet)[1])
+            szam_l.append(gyakorisagok(tweet)[2])
+            pont_l.append(gyakorisagok(tweet)[3])
+            vesz_l.append(gyakorisagok(tweet)[4])
+            irj_l.append(gyakorisagok(tweet)[5])
+            szo_l.append(gyakorisagok(tweet)[6])
+            bet_l.append(gyakorisagok(tweet)[7])
+            flood_l.append(gyakorisagok(tweet)[8])
+            apar_l.append(gyakorisagok(tweet)[9])
+            nagybar_l.append(gyakorisagok(tweet)[10])
+            szamar_l.append(gyakorisagok(tweet)[11])
+            modath_l.append(gyakorisagok(tweet)[12])
+            veszar_l.append(gyakorisagok(tweet)[13])
+            irjar_l.append(gyakorisagok(tweet)[14])
+            szohossz_l.append(gyakorisagok(tweet)[15])
+            floodar_l.append(gyakorisagok(tweet)[16])
+        except Exception as e:
+            print(e)
+            error += 1
+
+# create lists of features on tweets
+### DEV ###
+
+lexdiv_dev = []  # lexikai diverzitás (RootTTR)
+noun_dev = []  # főnevek aránya a tweetben
+verb_dev = []  # igék aránya a tweetben
+adj_dev = []  # melléknevek aránya a tweetben
+stoparany_dev = []  # stopszavak aránya a tweetben
+sentiscore_dev = []  # szentiment szkór a tweetre
+count_emojis_dev = []  # hány emoji van a tweetben
+emoji_hanyfele_dev = []  # hányféle emoji van a tweetben
+emoji_arany_dev = []  # emojik aránya a tweetben
+misspelled_dev = []  # hány szó van rosszul írva a tweetben
+kukacok_dev = []
+friends_dev = []
+RT_dev = []
+RT_authors_dev = []
+linkek_dev = []
+ap_l_dev = []
+nagyb_l_dev = []
+szam_l_dev = []
+pont_l_dev = []
+vesz_l_dev = []
+irj_l_dev = []
+szo_l_dev = []
+bet_l_dev = []
+flood_l_dev = []
+apar_l_dev = []
+nagybar_l_dev = []
+szamar_l_dev = []
+modath_l_dev = []
+veszar_l_dev = []
+irjar_l_dev = []
+szohossz_l_dev = []
+floodar_l_dev = []
+
+error_dev = 0
+szamlalo = 0
+for l in dev_x_raw:
+    szamlalo += 1
+    if szamlalo % 200 == 0:
+        print('dev:', szamlalo)
+    for tweet in l:
+        try:
+            lexdiv_dev.append(LexicalDiversity(tweet)[2])
+            noun_dev.append(PosTagger(tweet)[0])
+            verb_dev.append(PosTagger(tweet)[1])
+            adj_dev.append(PosTagger(tweet)[2])
+            stoparany_dev.append(StopCounter(tweet)[1])
+            sentiscore_dev.append(SentiScore(tweet))
+            count_emojis_dev.append(ExtractEmojis(tweet)[1])
+            emoji_hanyfele_dev.append(ExtractEmojis(tweet)[2])
+            emoji_arany_dev.append(ExtractEmojis(tweet)[3])
+            misspelled_dev.append(SpellChecker(tweet))
+            kukacok_dev.append(kukacokfv(tweet))
+            friends_dev.append(calls(tweet))
+            RT_dev.append(RTfv(tweet))
+            RT_authors_dev.append(RT_author(tweet))
+            linkek_dev.append(linkekfv(tweet))
+            ap_l_dev.append(gyakorisagok(tweet)[0])
+            nagyb_l_dev.append(gyakorisagok(tweet)[1])
+            gyak = gyakorisagok(tweet)
+            szam_l_dev.append(gyak[2])
+            pont_l_dev.append(gyak[3])
+            vesz_l_dev.append(gyak[4])
+            irj_l_dev.append(gyak[5])
+            szo_l_dev.append(gyak[6])
+            bet_l_dev.append(gyak[7])
+            flood_l_dev.append(gyak[8])
+            apar_l_dev.append(gyak[9])
+            nagybar_l_dev.append(gyak[10])
+            szamar_l_dev.append(gyak[11])
+            modath_l_dev.append(gyak[12])
+            veszar_l_dev.append(gyak[13])
+            irjar_l_dev.append(gyak[14])
+            szohossz_l_dev.append(gyak[15])
+            floodar_l_dev.append(gyak[16])
+        except Exception as e:
+            print(e)
+            error_dev += 1
+
+# create df from feautre lists
+
+df = pd.DataFrame(
+    {'0': botorhuman,
+     '1': lexdiv,
+     '2': noun,
+     '3': verb,
+     '4': adj,
+     '5': stoparany,
+     '6': sentiscore,
+     '7': count_emojis,
+     '8': emoji_hanyfele,
+     '9': emoji_arany,
+     '10': misspelled,
+     '11': kukacok,
+     '12': RT,
+     '13': linkek,
+     '14': ap_l,
+     '15': nagyb_l,
+     '16': szam_l,
+     '17': pont_l,
+     '18': vesz_l,
+     '19': irj_l,
+     '20': szo_l,
+     '21': bet_l,
+     '22': flood_l,
+     '23': apar_l,
+     '24': nagybar_l,
+     '25': szamar_l,
+     '26': modath_l,
+     '27': veszar_l,
+     '28': irjar_l,
+     '29': szohossz_l,
+     '30': floodar_l,
+     '31': friends,
+     '32': RT_authors
+     })
+
+df_dev = pd.DataFrame(
+    {'0': botorhuman_dev,
+     '1': lexdiv_dev,
+     '2': noun_dev,
+     '3': verb_dev,
+     '4': adj_dev,
+     '5': stoparany_dev,
+     '6': sentiscore_dev,
+     '7': count_emojis_dev,
+     '8': emoji_hanyfele_dev,
+     '9': emoji_arany_dev,
+     '10': misspelled_dev,
+     '11': kukacok_dev,
+     '12': RT_dev,
+     '13': linkek_dev,
+     '14': ap_l_dev,
+     '15': nagyb_l_dev,
+     '16': szam_l_dev,
+     '17': pont_l_dev,
+     '18': vesz_l_dev,
+     '19': irj_l_dev,
+     '20': szo_l_dev,
+     '21': bet_l_dev,
+     '22': flood_l_dev,
+     '23': apar_l_dev,
+     '24': nagybar_l_dev,
+     '25': szamar_l_dev,
+     '26': modath_l_dev,
+     '27': veszar_l_dev,
+     '28': irjar_l_dev,
+     '29': szohossz_l_dev,
+     '30': floodar_l_dev,
+     '31': friends_dev,
+     '32': RT_authors_dev
+     })
+
+
+
+# Fitting models
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import accuracy_score
+import pickle
+
+df2=df
+array = df2.values
+x_train = array[:,2:32]
+y_train = array[:,1]
+y_train = y_train.astype('int')
+
+
+df2_dev=df_dev
+array = df2_dev.values
+x_test = array[:,2:32]
+y_test = array[:,1].astype('int')
+
+classifier2 = LogisticRegression(C=1,fit_intercept=True)
+classifier2.fit(x_train, y_train)
+
+y_pred = classifier2.predict(x_test)
+y_pred_train = classifier2.predict(x_train)
+
+
+#saving the fitted model
+filename_lr = 'logreg_en.sav'
+pickle.dump(classifier2, open(filename_lr, 'wb'))
+
+# Aggregate variables and models
+friends_list = friends_list_fun(friends)
+friends_list_dev = friends_list_fun(friends_dev)
+RT_list = RT_list_fun(RT_authors)
+RT_list_dev = RT_list_fun(RT_authors_dev)
+
+kukac_perfo = kukactot(kukacok)
+kukac_perfo_dev = kukactot(kukacok_dev)
+kukac_variety = friends_ratio(friends_list,kukac_perfo)
+kukac_variety_dev = friends_ratio(friends_list_dev,kukac_perfo_dev)
+
+RT_perfo = RTtot(RT)
+RT_perfo_dev = RTtot(RT_dev)
+RT_variety = RT_ratio(RT_list,RT_perfo)
+RT_variety_dev = RT_ratio(RT_list_dev,RT_perfo_dev)
+
+chunks = [y_pred_train[x:x+100] for x in range(0, len(y_pred_train), 100)]
+
+aggr_mean_train = []
+aggr_min_train = []
+aggr_max_train = []
+aggr_d_train = []
+aggr_med_train = []
+for i in range(len(chunks)):
+    aggr_mean_train.append(np.mean(chunks[i]))
+    aggr_min_train.append(np.min(chunks[i]))
+    aggr_max_train.append(np.max(chunks[i]))
+    aggr_d_train.append(np.std(chunks[i]))
+    aggr_med_train.append(np.median(chunks[i]))
+
+chunks = [y_pred[x:x+100] for x in range(0, len(y_pred), 100)]
+
+aggr_mean_test = []
+aggr_min_test = []
+aggr_max_test = []
+aggr_d_test = []
+aggr_med_test = []
+
+
+for i in range(len(chunks)):
+    aggr_mean_test.append(np.mean(chunks[i]))
+    aggr_min_test.append(np.min(chunks[i]))
+    aggr_max_test.append(np.max(chunks[i]))
+    aggr_d_test.append(np.std(chunks[i]))
+    aggr_med_test.append(np.median(chunks[i]))
+
+valos_perfo_train = []
+for j in range(0,int(len(y_train)/100)):
+    valos_perfo_train.append((y_train[j*100]))
+
+valos_perfo = []
+for j in range(0,int(len(y_test)/100)):
+    valos_perfo.append((y_test[j*100]))
+
+joslat_train = [round(i) for i in aggr_mean_train] # vágás
+joslat = [round(i) for i in aggr_mean_test]
+
+df_agg_train_en = pd.DataFrame(
+{
+    '0':valos_perfo_train,
+    '1':aggr_mean_train,
+    '2':aggr_min_train,
+    '3':aggr_max_train,
+    '4':aggr_d_train,
+    '5':kukac_perfo,
+    '6':kukac_variety,
+    '7':RT_perfo,
+    '8':RT_variety,
+    '9':joslat_train,
+    '10':aggr_med_train
+})
+
+df_agg_test_en = pd.DataFrame(
+{
+    '0':valos_perfo,
+    '1':aggr_mean_test,
+    '2':aggr_min_test,
+    '3':aggr_max_test,
+    '4':aggr_d_test,
+    '5':kukac_perfo_dev,
+    '6':kukac_variety_dev,
+    '7':RT_perfo_dev,
+    '8':RT_variety_dev,
+    '9':joslat,
+    '10':aggr_med_test
+})
+
+array = df_agg_train_en.values
+x_train = array[:,1:df_agg_train_en.shape[1]]
+y_train = array[:,0]
+
+array = df_agg_test_en.values
+x_test = array[:,1:df_agg_test_en.shape[1]]
+y_test = array[:,0]
+
+classifier_agg = LogisticRegression(C=1,fit_intercept =True,solver = 'lbfgs')
+classifier_agg.fit(x_train, y_train)
+
+y_pred = classifier_agg.predict(x_test)
+
+print(classification_report(y_test,y_pred))
+
+#saving the fitted model
+filename = 'aggreg_logreg_en.sav'
+pickle.dump(classifier_agg, open(filename, 'wb'))
+
+
+
